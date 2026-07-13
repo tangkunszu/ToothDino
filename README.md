@@ -148,20 +148,12 @@ Paper setting:
 | LR schedule | cosine |
 | teacher update | EMA |
 
-Current repository note: `dinov3/configs/train/vitb_toothdino_lowrisk.yaml` currently sets `optim.epochs: 300`. For strict paper reproduction, set it to `200`.
-
 ## Main Config
 
 Use this config as the paper-aligned ToothDINO entry point:
 
 ```bash
 dinov3/configs/train/vitb_toothdino_paper.yaml
-```
-
-The older local experiment config is also available:
-
-```bash
-dinov3/configs/train/vitb_toothdino_lowrisk.yaml
 ```
 
 Before training, set the official DINOv3-B/16 checkpoint and dataset path:
@@ -215,7 +207,6 @@ dinov3/
   configs/
     ssl_default_config.yaml
     train/vitb_toothdino_paper.yaml
-    train/vitb_toothdino_lowrisk.yaml
   data/
     augmentations.py
     augmentations_medical.py

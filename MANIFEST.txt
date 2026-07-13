@@ -2,7 +2,6 @@ LICENSE.md
 MANIFEST.txt
 README.md
 dinov3/configs/ssl_default_config.yaml
-dinov3/configs/train/vitb_toothdino_lowrisk.yaml
 dinov3/configs/train/vitb_toothdino_paper.yaml
 dinov3/data/augmentations.py
 dinov3/data/augmentations_medical.py
