@@ -227,7 +227,6 @@ dinov3/
 requirements-toothdino.txt
 environment-toothdino.yml
 docs/TOOTHDINO_GITHUB_README.md
-newtoothdino.tex
 ```
 
 Optional but useful:
@@ -273,4 +272,13 @@ Use `requirements-toothdino.txt` for the pretraining stack and `environment-toot
 
 ## Citation
 
-If you publish this code, include citations for DINOv3 and the ToothDINO paper draft represented by `newtoothdino.tex`.
+This repository builds on DINOv3. Please cite the original DINOv3 work:
+
+```bibtex
+@article{simeoni2025dinov3,
+  title={DINOv3},
+  author={Simeoni, Oriane and Vo, Huy V. and Seitzer, Maximilian and Baldassarre, Federico and Oquab, Maxime and others},
+  journal={arXiv preprint arXiv:2508.10104},
+  year={2025}
+}
+```
