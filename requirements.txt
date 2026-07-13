@@ -1,0 +1,23 @@
+# Core ToothDINO pretraining requirements.
+# Use the PyTorch wheel matching your CUDA driver. The local extraction
+# environment used torch==2.7.1+cu118 and torchvision==0.22.1+cu118.
+torch>=2.7.0
+torchvision>=0.22.0
+torchmetrics==1.6.1
+omegaconf==2.3.0
+numpy==1.26.4
+Pillow==11.3.0
+scikit-learn==1.6.1
+ftfy==6.3.1
+regex==2024.11.6
+termcolor>=2.4.0
+submitit>=1.5.0
+iopath>=0.1.10
+
+# Optional downstream evaluation stack.
+# Install these only if running MMPreTrain/MMDetection/MMSegmentation protocols.
+mmengine>=0.10.0
+# mmcv>=2.0.0
+# mmdet>=3.0.0
+# mmsegmentation>=1.0.0
+# mmpretrain>=1.0.0
