@@ -43,7 +43,7 @@ Paper settings:
 | global resolution | `256 x 256` |
 | local resolution | `128 x 128` |
 | global crop scale | `[0.32, 1.0]` |
-| local crop scale after tooth-centric center selection | `[0.65, 1.0]` |
+| representative local crop control | `local_crops_scale = [0.05, 0.32]`, `local_crop_min_scale = 0.6`, `local_crop_max_scale = 1.0` |
 | local crop jitter | `tau_x = tau_y = 0.15` |
 
 The current implementation entry point is:
@@ -56,7 +56,9 @@ Relevant implementation symbols:
 - `DataAugmentationDINO`
 - `MedicalImageAugmentation`
 - `_sample_global_crop_with_meta`
-- `_sample_hierarchical_local_crops`
+- `_sample_representative_tooth_direct_local_crops`
+- `_get_representative_tooth_centers_fast`
+- `_representative_tooth_centers_from_band`
 
 ## DXA: Dental X-ray Augmentation
 
@@ -86,7 +88,7 @@ S(u, v) = E(u, v) * (0.35 + 0.65 * psi(x(u, v))) * pi_v(v)
 psi(z) = clip((z - 0.18) / 0.52, 0, 1)
 ```
 
-The implementation then estimates the dental extent using smoothed horizontal and vertical projections and distributes representative crop centers from left to right along upper and lower tooth rows.
+The paper configuration uses `dental_representative_tooth_direct`: the implementation estimates the dental extent using smoothed horizontal and vertical projections, distributes representative crop centers from left to right along upper and lower tooth rows, and samples local crops around those centers.
 
 Paper thresholds:
 
