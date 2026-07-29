@@ -1526,6 +1526,12 @@ class SSLMetaArch(nn.Module):
             rotation_range=tuple(augmentation_cfg.rotation_range) if augmentation_cfg is not None else (0, 5),
             augmentation_mode=augmentation_cfg.mode if augmentation_cfg is not None else "natural",
             local_crop_strategy=cfg.crops.local_crop_strategy,
+            direct_center_jitter=(
+                cfg.crops.direct_center_jitter if "direct_center_jitter" in cfg.crops else 0.03
+            ),
+            direct_random_scale=(
+                cfg.crops.direct_random_scale if "direct_random_scale" in cfg.crops else True
+            ),
             local_quadrant_ratio=cfg.crops.local_quadrant_ratio,
             local_arch_focus_strength=cfg.crops.local_arch_focus_strength,
             local_crop_jitter=cfg.crops.local_crop_jitter,

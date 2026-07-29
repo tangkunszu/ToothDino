@@ -4,7 +4,7 @@ ToothDINO is a geometry-aware continued-pretraining recipe for panoramic dental 
 
 - **DAVC: Dental-Aware View Construction** builds two panorama-level global views and eight tooth-centric local views.
 - **DXA: Dental X-ray Augmentation** replaces natural-image color augmentation with grayscale radiograph-compatible intensity and geometric perturbations.
-- **TCC: Tooth-Centric Cropping** places local crops around the tooth-bearing region using a weak edge-intensity geometric prior, without tooth boxes or segmentation masks.
+- **TCC: Tooth-Centric Cropping** places stochastic local crops around the tooth-bearing region using a weak edge-intensity geometric prior, without tooth boxes or segmentation masks.
 - **ABM: Anatomy-Biased Masking** samples iBOT masked-token positions with a fixed elliptical dental-band prior on the global-view patch grid.
 
 This document is extracted from `newtoothdino.tex` and aligned with the current implementation in this repository.
@@ -43,8 +43,10 @@ Paper settings:
 | global resolution | `256 x 256` |
 | local resolution | `128 x 128` |
 | global crop scale | `[0.32, 1.0]` |
-| representative local crop control | `local_crops_scale = [0.05, 0.32]`, `local_crop_min_scale = 0.6`, `local_crop_max_scale = 1.0` |
-| local crop jitter | `tau_x = tau_y = 0.15` |
+| local crop area fraction | `local_crops_scale = [0.05, 0.32]` |
+| local crop aspect ratio | log-uniform in `[3/4, 4/3]` |
+| local crop jitter | `tau_x = tau_y = 0.03` |
+| paper strategy | `dental_stochastic_tooth_centric` |
 
 The current implementation entry point is:
 
@@ -57,6 +59,7 @@ Relevant implementation symbols:
 - `MedicalImageAugmentation`
 - `_sample_global_crop_with_meta`
 - `_sample_representative_tooth_direct_local_crops`
+- `_sample_fixed_center_local_crops`
 - `_get_representative_tooth_centers_fast`
 - `_representative_tooth_centers_from_band`
 
@@ -88,7 +91,9 @@ S(u, v) = E(u, v) * (0.35 + 0.65 * psi(x(u, v))) * pi_v(v)
 psi(z) = clip((z - 0.18) / 0.52, 0, 1)
 ```
 
-The paper configuration uses `dental_representative_tooth_direct`: the implementation estimates the dental extent using smoothed horizontal and vertical projections, distributes representative crop centers from left to right along upper and lower tooth rows, and samples local crops around those centers.
+The paper configuration uses `dental_stochastic_tooth_centric`: the implementation estimates the dental extent using smoothed horizontal and vertical projections, distributes representative crop centers from left to right along upper and lower tooth rows, then samples local crops with per-view center jitter, area sampling, and aspect-ratio sampling. This preserves the tooth-centric placement prior while matching the standard DINOv3 local multi-crop geometry. The crop is taken directly from the shared augmented panorama and resized to `128 x 128`.
+
+The deterministic representative-center variant is retained as `dental_representative_tooth_direct` and is referred to as **TCC-old**. It is kept for ablations and reproducibility, but it is not the default paper method in this release.
 
 Paper thresholds:
 
@@ -96,7 +101,9 @@ Paper thresholds:
 | --- | --- |
 | horizontal energy threshold | `0.48 * max smoothed column energy` |
 | row energy threshold | `0.58 * max smoothed row energy within estimated extent` |
-| center jitter | `U(-0.15, 0.15)` in normalized coordinates |
+| center jitter | `U(-0.03, 0.03)` in normalized coordinates |
+| local area fraction | `U(0.05, 0.32)` |
+| aspect ratio | `exp(U(log(3/4), log(4/3)))` |
 
 ## ABM: Anatomy-Biased Masking
 

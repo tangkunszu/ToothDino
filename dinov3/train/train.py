@@ -59,7 +59,11 @@ def _parse_dataset_root(dataset_str: str) -> str | None:
 
 def _prepare_representative_tooth_cache(cfg, dataset_path: str):
     crops_cfg = cfg.crops
-    if crops_cfg.get("local_crop_strategy", "") != "dental_representative_tooth_direct":
+    if crops_cfg.get("local_crop_strategy", "") not in {
+        "dental_representative_tooth_direct",
+        "dental_stochastic_tooth_centric",
+        "dental_representative_tooth_direct_jitter",
+    }:
         return
     cache_path = crops_cfg.get("representative_tooth_cache_path", None)
 

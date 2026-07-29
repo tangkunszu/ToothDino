@@ -163,12 +163,14 @@ crops:
   global_crops_size: 256
   local_crops_size: 128
   localcrops_subset_of_globalcrops: false
-  local_crop_strategy: dental_representative_tooth_direct
+  local_crop_strategy: dental_stochastic_tooth_centric
+  direct_center_jitter: 0.03
+  direct_random_scale: true
   local_quadrant_ratio: 0.5
   local_arch_focus_strength: 0.7
-  local_crop_jitter: 0.15
-  local_crop_min_scale: 0.6
-  local_crop_max_scale: 1.0
+  local_crop_jitter: 0.03
+  local_crop_min_scale: 0.05
+  local_crop_max_scale: 0.32
   share_color_jitter: false
   horizontal_flips: true
   gram_teacher_crops_size: null

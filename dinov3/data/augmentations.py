@@ -80,6 +80,8 @@ class DataAugmentationDINO(object):
         band_aware_fast_use_official_area_scale=False,
         representative_tooth_aware_attempts=80,
         representative_tooth_cache_path=None,
+        direct_center_jitter=0.03,
+        direct_random_scale=True,
         xray_noise_probability=0.15,
         xray_noise_std=(0.005, 0.02),
         spectral_augmentation_enabled=False,
@@ -139,6 +141,8 @@ class DataAugmentationDINO(object):
         self.representative_tooth_aware_attempts = int(max(representative_tooth_aware_attempts, 1))
         self.representative_tooth_cache_path = representative_tooth_cache_path
         self.representative_tooth_cache = self._load_representative_tooth_cache(representative_tooth_cache_path)
+        self.direct_center_jitter = direct_center_jitter
+        self.direct_random_scale = direct_random_scale
         self.accepts_image_path = True
         self.anatomy_guided_masking_enabled = anatomy_guided_masking_enabled
         self.anatomy_guided_masking_source = anatomy_guided_masking_source
@@ -550,6 +554,25 @@ class DataAugmentationDINO(object):
                     local_crop_boxes,
                     local_source_global_indices,
                 ) = self._sample_representative_tooth_direct_local_crops(image, image_path=image_path)
+            elif self.local_crop_strategy in (
+                # TCC: stochastic tooth-centric local crops used by the paper method.
+                # The deterministic direct representative-center variant remains
+                # available as dental_representative_tooth_direct / TCC-old.
+                "dental_stochastic_tooth_centric",
+                "dental_representative_tooth_direct_jitter",
+            ):
+                (
+                    local_crops,
+                    local_side_labels,
+                    local_region_labels,
+                    local_crop_boxes,
+                    local_source_global_indices,
+                ) = self._sample_representative_tooth_direct_local_crops(
+                    image,
+                    image_path=image_path,
+                    center_jitter=self.direct_center_jitter,
+                    random_scale=self.direct_random_scale,
+                )
             elif self.local_crop_strategy == "dental_representative_tooth_adaptive_direct":
                 (
                     local_crops,
@@ -1489,11 +1512,15 @@ class DataAugmentationDINO(object):
 
         return local_crops, local_side_labels, local_region_labels, local_crop_boxes, local_source_global_indices
 
-    def _sample_representative_tooth_direct_local_crops(self, image, image_path=None):
+    def _sample_representative_tooth_direct_local_crops(
+        self, image, image_path=None, center_jitter=0.0, random_scale=False
+    ):
         centers = self._get_cached_representative_tooth_centers(image_path)
         if centers is None:
             centers, _ = self._get_representative_tooth_centers_fast(image)
-        return self._sample_fixed_center_local_crops(image, centers)
+        return self._sample_fixed_center_local_crops(
+            image, centers, center_jitter=center_jitter, random_scale=random_scale
+        )
 
     def _sample_representative_tooth_static_direct_local_crops(self, image):
         centers = (
@@ -1512,7 +1539,7 @@ class DataAugmentationDINO(object):
         centers, _ = self._get_representative_tooth_centers(image)
         return self._sample_fixed_center_local_crops(image, centers)
 
-    def _sample_fixed_center_local_crops(self, image, centers):
+    def _sample_fixed_center_local_crops(self, image, centers, *, center_jitter=0.0, random_scale=False):
         local_crops = []
         local_side_labels = []
         local_region_labels = []
@@ -1522,6 +1549,8 @@ class DataAugmentationDINO(object):
         max_work_side = max(self.global_crops_size * 2, self.local_crops_size * 4)
         original_width, original_height = image.size
         max_original_side = max(original_width, original_height)
+        if random_scale:
+            max_work_side = max_original_side
         work_to_original_scale = 1.0
         if max_original_side > max_work_side:
             scale = float(max_work_side) / float(max_original_side)
@@ -1534,16 +1563,27 @@ class DataAugmentationDINO(object):
 
         width, height = image.size
         image_area = float(width * height)
-        area_scale = float(np.sqrt(self.local_crops_scale[0] * self.local_crops_scale[1]))
-        crop_w = int(round(np.sqrt(image_area * area_scale)))
-        crop_h = int(round(np.sqrt(image_area * area_scale)))
-        crop_w = int(np.clip(crop_w, self.local_crops_size, width))
-        crop_h = int(np.clip(crop_h, self.local_crops_size, height))
+        fixed_area_scale = float(np.sqrt(self.local_crops_scale[0] * self.local_crops_scale[1]))
+        log_ratio_min = float(np.log(self.local_random_crop_ratio[0]))
+        log_ratio_max = float(np.log(self.local_random_crop_ratio[1]))
 
         total_local_crops = min(self.local_crops_number, len(centers))
         for center in centers[:total_local_crops]:
+            if random_scale:
+                area_scale = float(random.uniform(self.local_crops_scale[0], self.local_crops_scale[1]))
+                ratio = float(np.exp(random.uniform(log_ratio_min, log_ratio_max)))
+            else:
+                area_scale = fixed_area_scale
+                ratio = 1.0
+            target_area = image_area * area_scale
+            crop_w = int(np.clip(round(np.sqrt(target_area * ratio)), self.local_crops_size, width))
+            crop_h = int(np.clip(round(np.sqrt(target_area / ratio)), self.local_crops_size, height))
+
             center_x = width * center[0]
             center_y = height * center[1]
+            if center_jitter > 0.0:
+                center_x += random.uniform(-center_jitter, center_jitter) * width
+                center_y += random.uniform(-center_jitter, center_jitter) * height
             crop, box = self._crop_from_center(image, center_x, center_y, crop_w, crop_h)
             original_box = tuple(float(v) * work_to_original_scale for v in box)
             local_crops.append(self._finalize_tensor(self.local_transfo(crop), is_local=True))
