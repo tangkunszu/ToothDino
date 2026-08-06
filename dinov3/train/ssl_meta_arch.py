@@ -1513,6 +1513,12 @@ class SSLMetaArch(nn.Module):
             local_crops_size=cfg.crops.local_crops_size,
             gram_teacher_crops_size=cfg.crops.gram_teacher_crops_size,
             gram_teacher_no_distortions=cfg.crops.gram_teacher_no_distortions,
+            global_crops_ratio=(
+                tuple(cfg.crops.global_crops_ratio) if "global_crops_ratio" in cfg.crops else None
+            ),
+            teacher_no_color_jitter=(
+                cfg.crops.teacher_no_color_jitter if "teacher_no_color_jitter" in cfg.crops else False
+            ),
             local_crops_subset_of_global_crops=cfg.crops.localcrops_subset_of_globalcrops,
             share_color_jitter=cfg.crops.share_color_jitter,
             horizontal_flips=cfg.crops.horizontal_flips,
@@ -1643,6 +1649,21 @@ class SSLMetaArch(nn.Module):
             ),
             local_noise_scale=(
                 augmentation_cfg.local_noise_scale if augmentation_cfg is not None and "local_noise_scale" in augmentation_cfg else 1.25
+            ),
+            blur_probability_global1=(
+                augmentation_cfg.blur_probability_global1
+                if augmentation_cfg is not None and "blur_probability_global1" in augmentation_cfg
+                else None
+            ),
+            blur_probability_global2=(
+                augmentation_cfg.blur_probability_global2
+                if augmentation_cfg is not None and "blur_probability_global2" in augmentation_cfg
+                else None
+            ),
+            blur_probability_local=(
+                augmentation_cfg.blur_probability_local
+                if augmentation_cfg is not None and "blur_probability_local" in augmentation_cfg
+                else None
             ),
             spectral_augmentation_enabled=(
                 augmentation_cfg.spectral_enabled if augmentation_cfg is not None and "spectral_enabled" in augmentation_cfg else False

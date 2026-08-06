@@ -1,0 +1,253 @@
+# STAGE 2 -- high-resolution adaptation, run AFTER vitb_plus_davc_abm.yaml finishes.
+#
+# Why this stage exists, and why it is separate:
+# DINOv3 does not enable high resolution from the start. dinov3_vit7b16_high_res_adapt.yaml
+# is a short post-training stage (optim.epochs: 30, OFFICIAL_EPOCH_LENGTH: 1000, i.e. 30k
+# iterations against ~1M for the main run). The premise is a train/test resolution gap:
+# pretraining runs at 256 while dense downstream tasks -- detection, instance and semantic
+# segmentation, which are 3 of the 4 tasks here -- run at far higher resolution, and small
+# targets like caries margins and periapical lesions are the ones that suffer. Unlike Gram
+# anchoring, whose premise is dense-feature degradation over ~1M iterations and therefore
+# may not apply to a 44.6k-iteration continued-pretraining run, the resolution gap applies
+# regardless of how long training ran.
+#
+# Scaled down from the official recipe, which targets a 7B model:
+#   - official uses a multi-resolution schedule, global [512, 768, 768, 768, 768] with
+#     global_local_crop_pairs_ratios; this uses a single 512 to keep ViT-B cost sane
+#   - official keeps Gram anchoring on and needs a Gram teacher checkpoint; omitted here
+#     because the Gram premise is unverified at this scale (see gram note below)
+#   - batch is cut 64 -> 16 per GPU: global views cost 4x at 512 vs 256
+#
+# NOT VALIDATED. These hyperparameters are a scaled proposal, not a measured setting.
+# Watch the first few hundred iterations: if loss rises rather than settles, lower optim.lr.
+#
+# Before running, set student.pretrained_weights and MODEL.WEIGHTS to the teacher
+# checkpoint produced by the main run, e.g.
+#   output/newdino/vitb_plus_davc_abm/eval/training_<N>/teacher_checkpoint.pth
+
+MODEL:
+  META_ARCHITECTURE: SSLMetaArch
+  DEVICE: cuda
+  WEIGHTS: "/data/tangkun/project/dinov3newimprove/dinov3/output/newdino/vitb_plus_davc_abm/eval/training_44599/teacher_checkpoint.pth"
+  DTYPE: float32
+
+compute_precision:
+  param_dtype: bf16
+  reduce_dtype: fp32
+  sharding_strategy: SHARD_GRAD_OP
+
+dino:
+  loss_weight: 1.0
+  global_ignore_diagonal: true
+  head_n_prototypes: 16384
+  head_bottleneck_dim: 256
+  head_norm_last_layer: false
+  head_nlayers: 3
+  head_hidden_dim: 2048
+  koleo_loss_weight: 0.1
+  koleo_loss_distributed: false
+  koleo_topk: 1
+  koleo_distributed_replicas: 0
+  force_weight_norm: false
+
+ibot:
+  loss_weight: 1.0
+  mask_sample_probability: 0.5
+  mask_ratio_min_max: [0.1, 0.5]
+  mask_random_circular_shift: false
+  force_masking_even_with_zero_weight: false
+  separate_head: true
+  head_n_prototypes: 16384
+  head_bottleneck_dim: 256
+  head_norm_last_layer: false
+  head_nlayers: 3
+  head_hidden_dim: 2048
+
+augmentation:
+  medical_augmentation: true
+  gamma_range: [0.8, 1.2]
+  contrast_range: [0.85, 1.15]
+  brightness_range: [0.9, 1.1]
+  rotation_range: [0, 5]
+  mode: dental_xray
+  xray_noise_probability: 0.15
+  xray_noise_std: [0.005, 0.02]
+  view_aware_enabled: true
+  global_jitter_scale: 0.75
+  local_jitter_scale: 1.15
+  global_noise_scale: 0.75
+  local_noise_scale: 1.25
+  blur_probability_global1: 0.30
+  blur_probability_global2: 0.10
+  blur_probability_local: 0.40
+
+masking:
+  bias_mode: anatomy_biased
+  bias_strength: 2.5
+  focus_center_x: 0.5
+  focus_center_y: 0.61
+  focus_spread_x: 0.40
+  focus_spread_y: 0.25
+
+anatomy_guided_masking:
+  enabled: false
+
+auxiliary:
+  flip_prediction:
+    enabled: false
+    loss_weight: 0.0
+
+gram:
+  # Left off deliberately. DINOv3 turns Gram anchoring on only after ~1.01M iterations
+  # (dinov3_vit7b16_gram_anchor.yaml: gram.it_first_update 1010000, loss weight ramping
+  # from 0 only over the last 200 of 1200 epochs), because the dense-feature degradation
+  # it repairs is a long-training phenomenon. Whether it occurs in a 44.6k-iteration run
+  # is measurable: eval_checkpoint_max_to_keep is now 8, so run
+  # diagnose_patch_correspondence.py across stage-1 checkpoints. Turn this on only if
+  # dense correspondence is found to fall over training.
+  use_loss: false
+
+train:
+  # Batch cut 64 -> 16 because global views cost ~4x at 512. Epoch length raised so an
+  # "epoch" still covers a comparable number of images.
+  batch_size_per_gpu: 16
+  dataset_path: "MyDINOSet:root=/data/tangkun/pXray/All/train/pXray/"
+  output_dir: /data/tangkun/project/dinov3newimprove/dinov3/output/newdino/stage2_high_res_adapt
+  saveckp_freq: 5
+  seed: 0
+  num_workers: 8
+  OFFICIAL_EPOCH_LENGTH: 800
+  monitor_gradient_norm: false
+  chunk_schedule: []
+  cache_dataset: true
+  use_teacher_head: true
+  learn_from_teacher_tokens: false
+  centering: sinkhorn_knopp
+  checkpointing: false
+  checkpointing_full: false
+  compile: true
+  cudagraphs: false
+  sharded_eval_checkpoint: false
+
+student:
+  arch: vit_base
+  patch_size: 16
+  drop_path_rate: 0.1
+  layerscale: 1.0e-05
+  patch_drop: 0.0
+  pretrained_weights: "/data/tangkun/project/dinov3newimprove/dinov3/output/newdino/vitb_plus_davc_abm/eval/training_44599/teacher_checkpoint.pth"
+  ffn_layer: mlp
+  ffn_ratio: 4.0
+  resume_from_teacher_chkpt: ""
+  qkv_bias: true
+  proj_bias: true
+  ffn_bias: true
+  norm_layer: layernorm
+  n_storage_tokens: 4
+  mask_k_bias: true
+  in_chans: 3
+  pos_embed_type: rope
+  pos_embed_rope_base: 100.0
+  pos_embed_rope_min_period: null
+  pos_embed_rope_max_period: null
+  pos_embed_rope_normalize_coords: separate
+  pos_embed_rope_shift_coords: null
+  pos_embed_rope_jitter_coords: null
+  pos_embed_rope_rescale_coords: null
+  pos_embed_rope_dtype: bf16
+  fp8_enabled: false
+  fp8_filter: "blocks"
+
+teacher:
+  momentum_teacher: 0.998
+  final_momentum_teacher: 1
+  warmup_teacher_temp: 0.07
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 0
+  in_chans: 3
+
+distillation:
+  enabled: false
+  full_cfg_path: ""
+  checkpoint_path: ""
+
+multidistillation:
+  enabled: false
+
+hrft:
+  enabled: false
+  checkpoint_path: ""
+
+optim:
+  # Short adaptation, not a second training run: no warmup, low LR, cosine to near zero.
+  #
+  # 20 epochs = 16000 iterations, ~5.3 h at the main run's ~1.2 s/iter. OFFICIAL_EPOCH_LENGTH
+  # 800 with batch 16 x 4 GPUs is 12800 images, so one "epoch" here is close to one pass over
+  # the 51,654-image pool.
+  #
+  # The resolution gap this stage exists to close is large (diagnose_resolution_gap.py,
+  # 30 panoramas, checkpoint at iteration 35999):
+  #     512x256   98.6%   <- peak, 2x training resolution
+  #     768x384   97.9%
+  #    1024x512   96.1%
+  #    1536x768   94.6%
+  #   2048x1024   85.8%   <- 12.8 points below peak
+  #
+  # 20 rather than 10 because the change is substantial (256 -> 1024 patches, a 4x token
+  # count, which asks attention to behave differently) and lr is deliberately low at 1e-5,
+  # so parameters move slowly per step. Undertraining costs a weaker released backbone;
+  # overtraining costs ~2.6 h. saveckp_freq 5 writes a checkpoint at epochs 5/10/15/20 --
+  # run diagnose_resolution_gap.py on each and keep whichever stops improving at 2048px,
+  # rather than fixing the length in advance.
+  epochs: 20
+  optimizer: adamw
+  weight_decay: 0.04
+  weight_decay_end: 0.2
+  lr: 1.0e-05
+  warmup_epochs: 0
+  min_lr: 1.0e-07
+  schedule_trunc_extra: 0.0
+  clip_grad: 3.0
+  freeze_last_layer_epochs: 0
+  scaling_rule: sqrt_wrt_1024
+  patch_embed_lr_mult: 0.2
+  dino_head_wd_multiplier: 1.0
+  layerwise_decay: 0.9
+  multi_tensor_optim: true
+  dump_fsdp_weights_path: ""
+  adamw_beta1: 0.9
+  adamw_beta2: 0.999
+
+crops:
+  global_crops_scale: [0.32, 1.0]
+  local_crops_number: 8
+  local_crops_scale: [0.05, 0.26]
+  # The resolution change. Local views stay at 128: they are already small tooth-sized
+  # regions and the resolution gap is a global/dense-path problem.
+  global_crops_size: 512
+  local_crops_size: 128
+  localcrops_subset_of_globalcrops: false
+  local_crop_strategy: n_tcc
+  direct_center_jitter: 0.03
+  direct_random_scale: true
+  representative_tooth_cache_path: /data/tangkun/pXray/All/train/tooth_center_cache.json
+  share_color_jitter: false
+  # Official high-res adaptation disables flips for this stage; kept consistent here.
+  horizontal_flips: false
+  gram_teacher_crops_size: null
+  gram_teacher_no_distortions: false
+  rgb_mean: [0.485, 0.456, 0.406]
+  rgb_std: [0.229, 0.224, 0.225]
+
+evaluation:
+  eval_checkpoint_max_to_keep: 4
+  eval_period_iterations: 2000
+  low_freq_every: 5
+  config_files:
+    high_freq: benchmark_high_frequency.yaml
+    low_freq: benchmark_low_frequency.yaml
+
+checkpointing:
+  period: 4000
+  max_to_keep: 3
+  keep_every: 99999999999999999

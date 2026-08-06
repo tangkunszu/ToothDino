@@ -17,6 +17,7 @@ from pathlib import Path
 import gc, psutil
 import torch
 import torch.distributed
+import torch.distributed.checkpoint.state_dict as dcpsd
 from omegaconf import open_dict
 from torch.distributed._tensor import DTensor
 
@@ -369,32 +370,18 @@ def do_test(cfg, model, iteration, process_group, do_low_freq=False):
         if not distributed.is_subgroup_main_process():
             return
     else:
-        new_state_dict = model.model_ema.state_dict()
-        has_dtensor = any(isinstance(tensor, DTensor) for tensor in new_state_dict.values())
-        backend = ""
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            backend = str(torch.distributed.get_backend(process_group)).lower()
-        if has_dtensor and "nccl" in backend:
-            if distributed.is_subgroup_main_process():
-                logger.warning(
-                    "Falling back to sharded eval teacher checkpoint at %s because this PyTorch/NCCL backend "
-                    "cannot materialize DTensor with full_tensor(). Regular training checkpoints are unaffected.",
-                    iteration,
-                )
-            save_sharded_teacher_checkpoint()
-            return
         try:
-            for k, tensor in list(new_state_dict.items()):
-                if isinstance(tensor, DTensor):
-                    new_state_dict[k] = tensor.full_tensor()
+            new_state_dict = dcpsd.get_model_state_dict(
+                model.model_ema,
+                options=dcpsd.StateDictOptions(full_state_dict=True, cpu_offload=True),
+            )
         except RuntimeError as exc:
-            if "allgather_into_tensor_coalesced" not in str(exc):
-                raise
             if distributed.is_subgroup_main_process():
                 logger.warning(
-                    "Falling back to sharded eval teacher checkpoint at %s because this PyTorch/NCCL backend "
-                    "cannot materialize DTensor with full_tensor(). Regular training checkpoints are unaffected.",
+                    "Falling back to sharded eval teacher checkpoint at %s because full teacher checkpoint "
+                    "materialization failed: %s",
                     iteration,
+                    exc,
                 )
             save_sharded_teacher_checkpoint()
             return

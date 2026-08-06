@@ -29,6 +29,12 @@ except ImportError:
 logger = logging.getLogger("dinov3")
 
 
+# Smallest crop side (in source pixels) n-TCC will produce. Kept well below
+# local_crops_size so the requested crop geometry is never silently inflated;
+# sub-resolution crops are simply upsampled to local_crops_size, as in DINOv3.
+_LOCAL_CROP_MIN_PIXELS = 16
+
+
 class AdditiveGaussianNoise(nn.Module):
     def __init__(self, p=0.0, std_range=(0.005, 0.02)):
         super().__init__()
@@ -54,6 +60,7 @@ class DataAugmentationDINO(object):
         gram_teacher_crops_size=None,
         gram_teacher_no_distortions=False,
         teacher_no_color_jitter=False,
+        global_crops_ratio=None,
         local_crops_subset_of_global_crops=False,
         patch_size=16,
         share_color_jitter=False,
@@ -109,6 +116,9 @@ class DataAugmentationDINO(object):
         local_jitter_scale=1.15,
         global_noise_scale=0.75,
         local_noise_scale=1.25,
+        blur_probability_global1=None,
+        blur_probability_global2=None,
+        blur_probability_local=None,
         local_policy=None,
     ):
         self.global_crops_scale = global_crops_scale
@@ -117,6 +127,17 @@ class DataAugmentationDINO(object):
         self.global_crops_size = global_crops_size
         self.local_crops_size = local_crops_size
         self.local_random_crop_ratio = (3.0 / 4.0, 4.0 / 3.0)
+        # Aspect-ratio range of the GLOBAL crop taken from the source panorama, before it
+        # is resized to the square global_crops_size. The DINOv3 default (3/4, 4/3) picks a
+        # near-square region, which on a ~2:1 panorama covers only part of the arch:
+        # measured over 322 real global views, the median crop spans 0.494 of the image
+        # width and 0.608 of the dental arch, and only 0.3% contain >=95% of the arch.
+        # DINO's local-to-global objective assumes the global view represents the whole, so
+        # widening this range lets a global view actually contain the full dentition (at
+        # the cost of squashing it into the square target). None keeps the DINOv3 default.
+        self.global_random_crop_ratio = (
+            tuple(global_crops_ratio) if global_crops_ratio else (3.0 / 4.0, 4.0 / 3.0)
+        )
         self.gram_teacher_crops_size = gram_teacher_crops_size
         self.gram_teacher_no_distortions = gram_teacher_no_distortions
         self.teacher_no_color_jitter = teacher_no_color_jitter
@@ -139,10 +160,10 @@ class DataAugmentationDINO(object):
         self.band_aware_fast_lower_center_offset = band_aware_fast_lower_center_offset
         self.band_aware_fast_use_official_area_scale = band_aware_fast_use_official_area_scale
         self.representative_tooth_aware_attempts = int(max(representative_tooth_aware_attempts, 1))
-        self.representative_tooth_cache_path = representative_tooth_cache_path
-        self.representative_tooth_cache = self._load_representative_tooth_cache(representative_tooth_cache_path)
         self.direct_center_jitter = direct_center_jitter
         self.direct_random_scale = direct_random_scale
+        self.representative_tooth_cache_path = representative_tooth_cache_path
+        self.representative_tooth_cache = self._load_representative_tooth_cache(representative_tooth_cache_path)
         self.accepts_image_path = True
         self.anatomy_guided_masking_enabled = anatomy_guided_masking_enabled
         self.anatomy_guided_masking_source = anatomy_guided_masking_source
@@ -229,6 +250,8 @@ class DataAugmentationDINO(object):
         logger.info(f"local_crops_scale: {local_crops_scale}")
         logger.info(f"local_crops_number: {local_crops_number}")
         logger.info(f"global_crops_size: {global_crops_size}")
+        logger.info(f"global_crops_ratio: {self.global_random_crop_ratio}")
+        logger.info(f"teacher_no_color_jitter: {teacher_no_color_jitter}")
         logger.info(f"local_crops_size: {local_crops_size}")
         logger.info(f"gram_crops_size: {gram_teacher_crops_size}")
         logger.info(f"gram_teacher_no_distortions: {gram_teacher_no_distortions}")
@@ -339,9 +362,29 @@ class DataAugmentationDINO(object):
                     ),
                 ]
             )
-            global_transfo1_extra = v2.Compose([GaussianBlur(p=0.45 if view_aware_augmentation else 0.6)])
-            global_transfo2_extra = v2.Compose([GaussianBlur(p=0.15 if view_aware_augmentation else 0.2)])
-            local_transfo_extra = v2.Compose([GaussianBlur(p=0.4 if view_aware_augmentation else 0.3)])
+            # Blur probabilities are configurable because the shipped defaults contradict
+            # the weak-global / strong-local intent: global view 1 blurs at 0.45 while the
+            # local branch blurs at 0.40. That 0.45/0.15 split is inherited from DINOv3,
+            # where the asymmetry exists to make the two teacher views differ, not to make
+            # the global branch weak. Leaving these at None keeps the historical values.
+            blur_p_global1 = 0.45 if view_aware_augmentation else 0.6
+            blur_p_global2 = 0.15 if view_aware_augmentation else 0.2
+            blur_p_local = 0.4 if view_aware_augmentation else 0.3
+            if blur_probability_global1 is not None:
+                blur_p_global1 = float(blur_probability_global1)
+            if blur_probability_global2 is not None:
+                blur_p_global2 = float(blur_probability_global2)
+            if blur_probability_local is not None:
+                blur_p_local = float(blur_probability_local)
+            logger.info(
+                "blur probability: global1=%.2f global2=%.2f local=%.2f",
+                blur_p_global1,
+                blur_p_global2,
+                blur_p_local,
+            )
+            global_transfo1_extra = v2.Compose([GaussianBlur(p=blur_p_global1)])
+            global_transfo2_extra = v2.Compose([GaussianBlur(p=blur_p_global2)])
+            local_transfo_extra = v2.Compose([GaussianBlur(p=blur_p_local)])
         else:
             color_jittering = v2.Compose(
                 [
@@ -546,20 +589,27 @@ class DataAugmentationDINO(object):
                     local_crop_boxes,
                     local_source_global_indices,
                 ) = self._sample_representative_tooth_aware_local_crops(image)
-            elif self.local_crop_strategy == "dental_representative_tooth_direct":
+            elif self.local_crop_strategy == "tcc_legacy":
+                # Pre-n-TCC geometry, frozen verbatim for the TCC vs n-TCC ablation.
                 (
                     local_crops,
                     local_side_labels,
                     local_region_labels,
                     local_crop_boxes,
                     local_source_global_indices,
-                ) = self._sample_representative_tooth_direct_local_crops(image, image_path=image_path)
+                ) = self._sample_tcc_legacy_local_crops(image, image_path=image_path)
             elif self.local_crop_strategy in (
-                # TCC: stochastic tooth-centric local crops used by the paper method.
-                # The deterministic direct representative-center variant remains
-                # available as dental_representative_tooth_direct / TCC-old.
-                "dental_stochastic_tooth_centric",
-                "dental_representative_tooth_direct_jitter",
+                # n-TCC: tooth-centric local crops placed on representative tooth-row
+                # centers, with crop side = sqrt(area_scale) * H -- anchored to image
+                # height rather than image area so the ~2:1 panoramic aspect ratio does not
+                # inflate the crop, and taken straight from the source panorama. Area,
+                # aspect and center jitter are redrawn per crop, so the local branch never
+                # sees pixel-identical views across epochs. Set direct_center_jitter=0.0
+                # and direct_random_scale=false for the deterministic ablation.
+                "n_tcc",
+                "dental_representative_tooth_direct",  # legacy alias
+                "dental_stochastic_tooth_centric",  # legacy alias
+                "dental_representative_tooth_direct_jitter",  # legacy alias
             ):
                 (
                     local_crops,
@@ -858,7 +908,7 @@ class DataAugmentationDINO(object):
             top, left, crop_h, crop_w = v2.RandomResizedCrop.get_params(
                 image,
                 scale=list(self.global_crops_scale),
-                ratio=[3.0 / 4.0, 4.0 / 3.0],
+                ratio=list(self.global_random_crop_ratio),
             )
             crop = image.crop((left, top, left + crop_w, top + crop_h))
             crop = crop.resize((self.global_random_crop.size[1], self.global_random_crop.size[0]), resample=Image.BICUBIC)
@@ -1539,12 +1589,28 @@ class DataAugmentationDINO(object):
         centers, _ = self._get_representative_tooth_centers(image)
         return self._sample_fixed_center_local_crops(image, centers)
 
-    def _sample_fixed_center_local_crops(self, image, centers, *, center_jitter=0.0, random_scale=False):
+    def _sample_tcc_legacy_local_crops(self, image, image_path=None):
+        """TCC as it was before the n-TCC scale fix. Frozen for ablation -- do not modify.
+
+        Differences from _sample_fixed_center_local_crops (n-TCC):
+          crop area is a fraction of W*H rather than H*H, crops are taken from a
+          downscaled working copy, the crop side is floored at local_crops_size, and
+          the local branch gets no horizontal flip. Reached via
+          local_crop_strategy: tcc_legacy, with direct_center_jitter / direct_random_scale
+          selecting the stochastic or deterministic legacy variant.
+        """
+        centers = self._get_cached_representative_tooth_centers(image_path)
+        if centers is None:
+            centers, _ = self._get_representative_tooth_centers_fast(image)
+
         local_crops = []
         local_side_labels = []
         local_region_labels = []
         local_crop_boxes = []
         local_source_global_indices = []
+
+        center_jitter = self.direct_center_jitter
+        random_scale = self.direct_random_scale
 
         max_work_side = max(self.global_crops_size * 2, self.local_crops_size * 4)
         original_width, original_height = image.size
@@ -1590,6 +1656,70 @@ class DataAugmentationDINO(object):
             local_side_labels.append(self._encode_side_label(original_width, original_box))
             local_region_labels.append(1)
             local_crop_boxes.append(original_box)
+            local_source_global_indices.append(0)
+
+        return local_crops, local_side_labels, local_region_labels, local_crop_boxes, local_source_global_indices
+
+    def _sample_fixed_center_local_crops(self, image, centers, *, center_jitter=0.0, random_scale=False):
+        local_crops = []
+        local_side_labels = []
+        local_region_labels = []
+        local_crop_boxes = []
+        local_source_global_indices = []
+
+        # Crop straight from the full-resolution panorama, exactly like the official
+        # random strategy. Downscaling to a working image first would (a) floor the
+        # reachable crop area at local_crops_size^2 / work_area, truncating the low end of
+        # local_crops_scale, (b) put a second resampling step in the pipeline, confounding
+        # an n-TCC vs random ablation with a resolution difference, and (c) cost more, not
+        # less: measured on a 2774x1504 panorama, 14.8 ms cropping directly vs 41.7 ms via
+        # a 1280 px working copy, because resizing touches every pixel of the panorama
+        # while the eight crops together touch only part of it.
+        width, height = image.size
+        # n-TCC: anchor the crop area to H^2, not to W*H. Panoramic radiographs are ~2:1,
+        # so a square crop sized from full image area comes out sqrt(W/H) ~ 1.41x taller
+        # than the DINOv3 local_crops_scale semantics intend -- up to 0.80 H, at which
+        # point _crop_from_center clamps the box back inside the image and drags the lower
+        # tooth row's crops off their anchors toward the upper row. Anchored to H^2,
+        # side = sqrt(area_scale) * H and every crop stays on its anchor.
+        reference_area = float(height * height)
+        # Deterministic fallback: geometric mean of the configured area scale.
+        fixed_area_scale = float(np.sqrt(self.local_crops_scale[0] * self.local_crops_scale[1]))
+        log_ratio_min = float(np.log(self.local_random_crop_ratio[0]))
+        log_ratio_max = float(np.log(self.local_random_crop_ratio[1]))
+
+        total_local_crops = min(self.local_crops_number, len(centers))
+        for center in centers[:total_local_crops]:
+            if random_scale:
+                # Sample area uniformly (same semantics as RandomResizedCrop) plus an
+                # aspect-ratio draw, so the crop geometry differs on every epoch.
+                area_scale = float(random.uniform(self.local_crops_scale[0], self.local_crops_scale[1]))
+                ratio = float(np.exp(random.uniform(log_ratio_min, log_ratio_max)))
+            else:
+                area_scale = fixed_area_scale
+                ratio = 1.0
+            target_area = reference_area * area_scale
+            crop_w = int(np.clip(round(np.sqrt(target_area * ratio)), _LOCAL_CROP_MIN_PIXELS, width))
+            crop_h = int(np.clip(round(np.sqrt(target_area / ratio)), _LOCAL_CROP_MIN_PIXELS, height))
+
+            center_x = width * center[0]
+            center_y = height * center[1]
+            if center_jitter > 0.0:
+                center_x += random.uniform(-center_jitter, center_jitter) * width
+                center_y += random.uniform(-center_jitter, center_jitter) * height
+            crop, box = self._crop_from_center(image, center_x, center_y, crop_w, crop_h)
+            # Left-right mirroring of the dental arch is anatomically valid and is the
+            # cheapest remaining source of geometric entropy for the local branch:
+            # MedicalImageAugmentation is built with horizontal_flip=0.0 and the config's
+            # horizontal_flips only reaches global crops. local_side_labels are collated
+            # but consumed by no loss, so the label stays in unflipped coordinates.
+            if random.random() < self.horizontal_flip_p:
+                crop = crop.transpose(Image.FLIP_LEFT_RIGHT)
+            source_box = tuple(float(v) for v in box)
+            local_crops.append(self._finalize_tensor(self.local_transfo(crop), is_local=True))
+            local_side_labels.append(self._encode_side_label(width, source_box))
+            local_region_labels.append(1)
+            local_crop_boxes.append(source_box)
             local_source_global_indices.append(0)
 
         return local_crops, local_side_labels, local_region_labels, local_crop_boxes, local_source_global_indices

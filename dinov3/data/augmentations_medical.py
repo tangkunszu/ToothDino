@@ -43,10 +43,19 @@ class MedicalImageAugmentation:
 
     def _gamma_correction(self, img: Image.Image) -> Image.Image:
         gamma = random.uniform(self.gamma_range[0], self.gamma_range[1])
-        img_np = np.array(img).astype(np.float32) / 255.0
-        img_np = np.power(img_np, gamma)
-        img_np = np.clip(img_np, 0, 1)
-        return Image.fromarray((img_np * 255).astype(np.uint8))
+        # Input and output are both uint8, so gamma is a pure 0..255 -> 0..255 mapping and
+        # a 256-entry lookup table reproduces it exactly. The previous implementation ran
+        # np.power over every pixel in float32, which on a 2976x1536 panorama is 4.6M
+        # floating-point powers per image, per epoch. Image.point() is an integer table
+        # lookup instead. The float32 -> uint8 cast truncated rather than rounded, so the
+        # table truncates too and the result is bit-identical.
+        lut = self._gamma_lut(gamma)
+        return img.point(lut * len(img.getbands()))
+
+    @staticmethod
+    def _gamma_lut(gamma: float):
+        scale = np.arange(256, dtype=np.float32) / 255.0
+        return np.clip(np.power(scale, gamma), 0.0, 1.0).__mul__(255.0).astype(np.uint8).tolist()
 
     def _contrast_enhancement(self, img: Image.Image) -> Image.Image:
         if random.random() < 0.5:
