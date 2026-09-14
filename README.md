@@ -43,9 +43,9 @@ Paper settings:
 | global resolution | `256 x 256` |
 | local resolution | `128 x 128` |
 | global crop scale | `[0.32, 1.0]` |
-| representative local crop control | `local_crops_scale = [0.05, 0.32]` with deterministic geometric-mean area |
-| local crop center | representative upper/lower tooth-row centers |
-| paper strategy | `dental_representative_tooth_direct` |
+| local crop area | `local_crops_scale = [0.05, 0.26]`, sampled per view, anchored to `H^2` |
+| local crop center | representative upper/lower tooth-row centers, with bounded jitter |
+| paper strategy | `n_tcc` (legacy alias: `dental_representative_tooth_direct`) |
 
 The current implementation entry point is:
 
@@ -74,9 +74,19 @@ Paper settings:
 | contrast | `[0.85, 1.15]` |
 | brightness | `[0.9, 1.1]` |
 | in-plane rotation | `[0, 5]` degrees |
-| local Gaussian noise std | `[0.005, 0.02]` |
+| Gaussian noise std (both branches) | `[0.005, 0.02]` |
+| jitter strength, global / local | `0.75` / `1.15` |
+| noise probability, global / local | `0.1125` / `0.1875` (base `0.15` scaled by `0.75` / `1.25`) |
+| blur probability, global view 1 / 2 | `0.30` / `0.10` |
+| blur probability, local | `0.40` |
 
-The local branch uses stronger crop-level perturbation than the global branch.
+The two crop-level stages share the same transformation family and differ only in
+strength and application probability: the noise standard deviation range is identical in
+both branches, and the local branch is perturbed more strongly and more often. The blur
+probabilities are set explicitly because the inherited DINOv3 defaults
+(`0.45 / 0.15 / 0.40`) make global view 1 blur *more* often than the local branch, which
+inverts the weak-global / strong-local intent. The asymmetry between the two global views
+is retained so that the two teacher targets differ, which is a separate purpose.
 
 ## TCC: Tooth-Centric Cropping
 
@@ -90,9 +100,25 @@ S(u, v) = E(u, v) * (0.35 + 0.65 * psi(x(u, v))) * pi_v(v)
 psi(z) = clip((z - 0.18) / 0.52, 0, 1)
 ```
 
-The paper configuration uses `dental_representative_tooth_direct`: the implementation estimates the dental extent using smoothed horizontal and vertical projections, distributes representative crop centers from left to right along upper and lower tooth rows, and samples local crops around those centers. This direct representative-center policy intentionally trades generic crop-position entropy for anatomically concentrated local supervision.
+The paper configuration uses `n_tcc`: the implementation estimates the dental extent using
+smoothed horizontal and vertical projections, distributes representative crop centers from
+left to right along upper and lower tooth rows, and samples local crops around those
+centers with bounded center jitter and per-view area and aspect-ratio sampling. This
+representative-center policy trades generic crop-position entropy for anatomically
+concentrated local supervision, while the jitter and scale sampling keep the local views
+from being pixel-identical across epochs.
 
-An optional stochastic extension is retained as `dental_stochastic_tooth_centric` / `dental_representative_tooth_direct_jitter`. It restores center jitter, per-view scale sampling, and aspect-ratio sampling for ablation, but it is not the default paper method in this release.
+Local crop area is anchored to `H^2` rather than to the full image area `W*H`. Panoramic
+radiographs have an aspect ratio close to `2:1`, so a crop sized from the full image area
+comes out about `sqrt(W/H) = 1.41` times taller than the standard local-crop semantics
+intend, up to `0.80 * H`, at which point the crop box is clamped back inside the image and
+the lower tooth row's crops are dragged off their anchors toward the upper row. With the
+`0.26` upper bound the tallest crop stays at `0.589 * H`, below that threshold.
+
+`dental_representative_tooth_direct` and `dental_representative_tooth_direct_jitter` are
+retained as legacy aliases of `n_tcc` and select the same code path. Setting
+`direct_center_jitter: 0.0` and `direct_random_scale: false` recovers the deterministic
+variant used for ablation.
 
 Paper thresholds:
 
@@ -101,8 +127,9 @@ Paper thresholds:
 | horizontal energy threshold | `0.48 * max smoothed column energy` |
 | row energy threshold | `0.58 * max smoothed row energy within estimated extent` |
 | representative centers | four upper-row and four lower-row anchors |
-| local crop geometry | deterministic square crop from the geometric mean of `local_crops_scale` |
-| optional stochastic variant | `direct_center_jitter = 0.03`, area `U(0.05, 0.32)`, aspect ratio `exp(U(log(3/4), log(4/3)))` |
+| center jitter | `direct_center_jitter = 0.03`, i.e. `U(-0.03, 0.03)` of image width and height |
+| local crop area | `U(0.05, 0.26)` of `H^2`, aspect ratio `exp(U(log(3/4), log(4/3)))` |
+| deterministic ablation | `direct_center_jitter = 0.0`, `direct_random_scale = false` |
 
 ## ABM: Anatomy-Biased Masking
 
@@ -121,9 +148,42 @@ Paper settings:
 | Parameter | Value |
 | --- | --- |
 | `beta` | `2.5` |
-| center `(c_x, c_y)` | `(0.5, 0.5)` |
-| spread `(sigma_x, sigma_y)` | `(0.35, 0.20)` |
-| mask ratio | `U(0.1, 0.5)` |
+| center `(c_x, c_y)` | `(0.5, 0.61)` |
+| spread `(sigma_x, sigma_y)` | `(0.40, 0.25)` |
+| mask ratio range | `[0.1, 0.5]` |
+| masked fraction of student global views | `0.5` (`ibot.mask_sample_probability`) |
+
+The vertical center sits below the view center because the prior lives on the global-view
+patch grid, and global views are random resized crops, so the tooth-bearing band does not
+coincide with the view center. Measured over the full pretraining corpus -- 57,090
+radiographs, 114,180 global views, and 736,074 tooth anchors visible inside a view --
+anchors land at `x = 0.500 +- 0.246` and `y = 0.610 +- 0.128` in normalized view
+coordinates. The uncalibrated `(0.5, 0.5)` / `(0.35, 0.20)` prior puts `0.610` of its mass
+on real tooth anchors; the values above raise that to `0.749`.
+
+Both sit at their optimum. Sweeping `c_y` at fixed spread peaks on a plateau at
+`0.60 - 0.62` (`0.50 -> 0.696`, `0.56 -> 0.738`, `0.60 -> 0.749`, `0.62 -> 0.749`,
+`0.66 -> 0.737`, `0.70 -> 0.712`). On a `0.05` grid no spread of smaller area than
+`0.40 x 0.25` reaches this mass (`(0.45, 0.20) -> 0.730`, `(0.50, 0.20) -> 0.748`,
+`(0.35, 0.25) -> 0.716`); wider spreads raise it further (`(0.55, 0.30) -> 0.836`) but
+only by flattening the prior toward uniform. Restricting the measurement to images with
+aspect ratio `>= 1.4` (48,384 radiographs, 602,901 anchors) changes nothing material
+(`0.609 -> 0.748`). Regenerate with `calibrate_abm_prior.py`.
+
+Two implementation details are worth stating explicitly, because both apply identically to
+the uniform-masking control and therefore do not confound the comparison:
+
+1. Only a fraction `0.5` of the student global views in each batch are masked; the rest
+   receive an empty mask and do not contribute to the iBOT term.
+2. Masking ratios are not drawn i.i.d. from `U(0.1, 0.5)`. For the `n` masked views in a
+   batch, the ratios are a deterministic stratification of `[0.1, 0.5]`, so each batch
+   covers the whole range exactly once; the assignment of ratios to views is shuffled.
+3. Masks are assembled from rectangular patch blocks, as in iBOT and DINOv3, not from
+   independently drawn patches. Block area is `U(4, M)` patches with log-uniform aspect
+   ratio in `[0.3, 10/3]`, and each block's top-left corner is drawn with probability
+   proportional to the mean of `p` over the window it would cover. Any shortfall is filled
+   by weighted sampling without replacement from `p`. The uniform control replaces `p` by
+   the uniform distribution in both steps and leaves everything else unchanged.
 
 Implementation entries:
 
@@ -146,15 +206,26 @@ Paper setting:
 | initialization | official DINOv3 ViT-B/16 weights |
 | backbone | ViT-B/16 |
 | patch size | 16 |
-| unlabeled corpus | 57,232 panoramic dental radiographs |
+| unlabeled corpus | 57,090 panoramic dental radiographs |
 | optimizer | AdamW |
 | base learning rate | `1e-4` |
-| batch size | `64` per GPU |
-| epochs | `200` |
+| LR scaling rule | `sqrt_wrt_1024` |
+| peak learning rate | `5e-5` (`1e-4 * sqrt(256/1024)`) |
+| minimum learning rate | `1e-6` |
+| batch size | `64` per GPU, `256` global on 4 GPUs |
+| epochs | `200` (`OFFICIAL_EPOCH_LENGTH = 223`, 44,600 steps) |
 | warm-up | `10` epochs |
 | weight decay | `0.04 -> 0.4` |
 | LR schedule | cosine |
-| teacher update | EMA |
+| layer-wise LR decay | `0.9` |
+| patch-embed LR multiplier | `0.2` |
+| gradient clipping | `3.0` |
+| freeze last layer | first `2` epochs |
+| teacher update | EMA, momentum `0.996 -> 1.0` |
+| teacher temperature | `0.04 -> 0.07` over `10` epochs |
+| centering | Sinkhorn-Knopp |
+| register tokens | `4` |
+| precision | bf16 parameters, fp32 gradient reduction |
 
 ## Main Config
 

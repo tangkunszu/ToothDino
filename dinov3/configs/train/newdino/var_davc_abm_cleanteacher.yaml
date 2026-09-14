@@ -79,11 +79,12 @@ augmentation:
 masking:
   # ABM on. The prior lives on the GLOBAL VIEW patch grid, and global views are random
   # resized crops, so the dental band does not sit at the centre of a view. Measured over
-  # 395 panoramas / 790 global views / 4930 tooth anchors visible inside a view, anchors
-  # land at x = 0.504 +- 0.259 and y = 0.602 +- 0.115. Recentring raises the prior mass
-  # falling on real tooth anchors from 0.617 to 0.749 (+21%). Widening further keeps
-  # raising that number but flattens the prior until it stops being a prior, so these are
-  # the smallest values reaching ~0.75. Regenerate with dinov3/visualize_abm_prior.py.
+  # the full 57,090-image corpus / 114,180 global views / 736,074 tooth anchors visible
+  # inside a view, anchors land at x = 0.500 +- 0.246 and y = 0.610 +- 0.128. Recentring
+  # raises the prior mass falling on real tooth anchors from 0.610 to 0.749. Both values
+  # sit at their optimum: sweeping c_y peaks on a plateau at 0.60-0.62, and no spread of
+  # smaller area reaches this mass, while wider spreads raise it only by flattening the
+  # prior toward uniform. Regenerate with calibrate_abm_prior.py.
   bias_mode: anatomy_biased
   bias_strength: 2.5
   focus_center_x: 0.5

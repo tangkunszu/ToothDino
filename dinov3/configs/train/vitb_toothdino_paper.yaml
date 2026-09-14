@@ -54,14 +54,31 @@ augmentation:
   local_jitter_scale: 1.15
   global_noise_scale: 0.75
   local_noise_scale: 1.25
+  # Blur probabilities, made explicit so the weak-global / strong-local intent actually
+  # holds. The inherited DINOv3 defaults (0.45 / 0.15 / 0.40) made global view 1 blur
+  # MORE often than the local branch. global1 > global2 is kept: that asymmetry exists to
+  # make the two teacher views differ. Remove these three keys to restore the defaults.
+  blur_probability_global1: 0.30
+  blur_probability_global2: 0.10
+  blur_probability_local: 0.40
 
 masking:
   bias_mode: anatomy_biased
   bias_strength: 2.5
+  # The prior is defined on the GLOBAL VIEW patch grid, not on the panorama, and global
+  # views are random resized crops, so the dental band does not sit at the centre of a
+  # view. Measured over the full 57,090-image corpus / 114,180 global views / 736,074
+  # tooth anchors visible inside a view, anchors land at x = 0.500 +- 0.246 and
+  # y = 0.610 +- 0.128. Recentring raises the prior mass falling on real tooth anchors
+  # from 0.610 to 0.749. Both values sit at their optimum: sweeping c_y peaks on a
+  # plateau at 0.60-0.62, and no spread of smaller area reaches this mass, while wider
+  # spreads raise it only by flattening the prior toward uniform. Restore
+  # 0.5 / 0.35 / 0.2 for the original uncalibrated prior. Regenerate these numbers with
+  # calibrate_abm_prior.py.
   focus_center_x: 0.5
-  focus_center_y: 0.5
-  focus_spread_x: 0.35
-  focus_spread_y: 0.2
+  focus_center_y: 0.61
+  focus_spread_x: 0.40
+  focus_spread_y: 0.25
 
 anatomy_guided_masking:
   enabled: false
@@ -159,11 +176,17 @@ optim:
 crops:
   global_crops_scale: [0.32, 1.0]
   local_crops_number: 8
-  local_crops_scale: [0.05, 0.32]
+  # Upper bound tightened from the DINOv3 default 0.32 for panoramic aspect ratios:
+  # n-TCC crop side is sqrt(area_scale) * H, and with ratio up to 4/3 an upper bound of
+  # 0.26 keeps the tallest crop at 0.589 * H, below the 0.60 * H point where the
+  # lower tooth row's box would be clamped away from its anchor.
+  local_crops_scale: [0.05, 0.26]
   global_crops_size: 256
   local_crops_size: 128
   localcrops_subset_of_globalcrops: false
-  local_crop_strategy: dental_representative_tooth_direct
+  local_crop_strategy: n_tcc
+  # Stochastic n-TCC. Set direct_center_jitter: 0.0 and direct_random_scale: false for
+  # the deterministic ablation.
   direct_center_jitter: 0.03
   direct_random_scale: true
   local_quadrant_ratio: 0.5
